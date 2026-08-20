@@ -111,16 +111,7 @@ struct RunMonitorView: View {
                         }
 
                         if !engine.currentContextPreview.isEmpty {
-                            DisclosureGroup("当前步骤实际提示上下文") {
-                                Text(engine.currentContextPreview)
-                                    .textSelection(.enabled)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.top, 8)
-                            }
-                            .padding(13)
-                            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+                            ContextPreviewDisclosure(context: engine.currentContextPreview)
                         }
                     }
                     .padding(12)
@@ -204,22 +195,7 @@ struct RunMonitorView: View {
     }
 
     private func startRun() {
-        let projectID = store.workspace.id
-        do {
-            let directory = try store.projectDirectory(for: projectID)
-            engine.start(
-                workspace: store.workspace,
-                workingDirectory: directory,
-                onMemory: { memory in
-                    store.integrateAutomaticMemory(memory, projectID: projectID)
-                },
-                onFinish: { session in
-                    store.archive(session)
-                }
-            )
-        } catch {
-            store.persistenceMessage = "无法建立项目工作目录：\(error.localizedDescription)"
-        }
+        RunLaunchCoordinator.startNew(store: store, engine: engine)
     }
 
     private func eventColor(_ kind: String) -> Color {
@@ -228,6 +204,7 @@ struct RunMonitorView: View {
         case "error": return Color(hex: "F43F5E")
         case "warning", "approval": return Color(hex: "F59E0B")
         case "retry": return Color(hex: "A78BFA")
+        case "recovery": return Color(hex: "2DD4BF")
         case "activity", "cli": return Color(hex: "38BDF8")
         default: return Color(hex: "93A0FF")
         }
@@ -240,7 +217,8 @@ private struct StepExecutionDisclosureCard: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 12) {
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 12) {
                 if let threadID = execution.cliThreadID {
                     Text("CLI thread \(threadID)")
                         .font(.caption2.monospaced())
@@ -252,6 +230,12 @@ private struct StepExecutionDisclosureCard: View {
                     Text(error)
                         .font(.callout)
                         .foregroundStyle(Color(hex: "FB7185"))
+                }
+
+                if execution.status == .interrupted {
+                    Label("上次异常退出时中断；以下是已保留的部分产物，新尝试会继续核对并补齐。", systemImage: "arrow.clockwise.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(hex: "2DD4BF"))
                 }
 
                 if execution.output.isEmpty && execution.status == .running {
@@ -282,13 +266,18 @@ private struct StepExecutionDisclosureCard: View {
                     .font(.caption)
                 }
 
-                if execution.status == .completed {
+                if execution.status == .completed, ReviewVerdictParser.parse(execution.output) == .fail {
+                    Label("审核判定 FAIL；该次结果仅用于回退反馈，未写入有效知识", systemImage: "arrow.uturn.backward.circle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color(hex: "FBBF24"))
+                } else if execution.status == .completed {
                     Label("关键内容已拆分、去重并自动写入共享记忆", systemImage: "brain.head.profile.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color(hex: "4ADE80"))
                 }
+                }
+                .padding(.top, 12)
             }
-            .padding(.top, 12)
         } label: {
             HStack(spacing: 9) {
                 Text("\(execution.stepNumber)")
@@ -311,6 +300,11 @@ private struct StepExecutionDisclosureCard: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
+                if let access = execution.executionAccess {
+                    Label(access.title, systemImage: access.symbol)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(access == .workspaceWrite ? Color(hex: "FBBF24") : .secondary)
+                }
                 ModelBadge(
                     modelID: execution.modelID ?? "CLI 默认模型",
                     effort: execution.reasoningEffort.flatMap(ReasoningEffort.init(rawValue:))
@@ -338,6 +332,29 @@ private struct StepExecutionDisclosureCard: View {
         case .completed: return Color(hex: "22C55E")
         case .failed: return Color(hex: "F43F5E")
         case .cancelled: return Color(hex: "94A3B8")
+        case .interrupted: return Color(hex: "2DD4BF")
         }
+    }
+}
+
+private struct ContextPreviewDisclosure: View {
+    let context: String
+    @State private var isExpanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            if isExpanded {
+                Text(context)
+                    .textSelection(.enabled)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
+        } label: {
+            Text("当前步骤实际提示上下文")
+        }
+        .padding(13)
+        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
     }
 }

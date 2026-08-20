@@ -88,7 +88,7 @@ private struct AgentRosterView: View {
                     Text(agent.name)
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
-                    Text("\(agent.role.title) · \(profileModelLabel(profile)) · \(profile?.reasoningEffort.title ?? "未配置")")
+                    Text("\(agent.roleTitle) · \(profileModelLabel(profile)) · \(profile?.reasoningEffort.title ?? "未配置")")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -128,6 +128,7 @@ private struct AgentRosterView: View {
 
 private struct WorkflowCanvasView: View {
     @EnvironmentObject private var store: WorkspaceStore
+    @State private var showsTaskDesigner = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -143,13 +144,22 @@ private struct WorkflowCanvasView: View {
                     }
                     Spacer()
                     Button {
-                        store.addStep(after: store.selectedStepID)
+                        showsTaskDesigner = true
                     } label: {
-                        Label("添加步骤", systemImage: "plus")
+                        Label("分配任务", systemImage: "sparkles")
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .tint(Color(hex: "5965E8"))
+                    .help("选择一名设计师调用本机 Codex CLI，生成可编辑流程草案")
+
+                    Button {
+                        store.addStep(after: store.selectedStepID)
+                    } label: {
+                        Label("手动添加", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 .padding(14)
 
@@ -181,6 +191,9 @@ private struct WorkflowCanvasView: View {
                 }
             }
             .glassPanel(emphasized: true)
+        }
+        .sheet(isPresented: $showsTaskDesigner) {
+            WorkflowDesignerView()
         }
     }
 
@@ -237,6 +250,12 @@ private struct WorkflowCanvasView: View {
                                 .font(.caption2)
                                 .foregroundStyle(Color(hex: "F43F5E"))
                                 .help("审核失败时回退")
+                        }
+                        if step.executionAccess == .workspaceWrite {
+                            Image(systemName: "pencil.and.outline")
+                                .font(.caption2)
+                                .foregroundStyle(Color(hex: "FBBF24"))
+                                .help("该步骤允许 Codex CLI 修改项目文件")
                         }
                     }
                     HStack(spacing: 5) {
@@ -310,7 +329,6 @@ private struct BlueprintInspectorView: View {
                       let index = store.workspace.agents.firstIndex(where: { $0.id == agentID }) {
                 AgentInspector(
                     agent: $store.workspace.agents[index],
-                    profiles: store.workspace.profiles,
                     canDelete: store.workspace.agents.count > 1,
                     onDelete: { store.deleteAgent(id: agentID) }
                 )
@@ -329,8 +347,8 @@ private struct BlueprintInspectorView: View {
 }
 
 private struct AgentInspector: View {
+    @EnvironmentObject private var store: WorkspaceStore
     @Binding var agent: AgentSeat
-    let profiles: [CodexProfile]
     let canDelete: Bool
     let onDelete: () -> Void
 
@@ -355,18 +373,38 @@ private struct AgentInspector: View {
                     .labelsHidden()
                 }
 
-                field("Codex 配置") {
-                    Picker("", selection: $agent.profileID) {
-                        ForEach(profiles) { profile in
-                            Text("\(profile.name) · \(profile.modelID.isEmpty ? "CLI 默认" : profile.modelID) · \(profile.reasoningEffort.title)").tag(profile.id)
+                if agent.role == .custom {
+                    field("自定义角色类型") {
+                        TextField("例如：产品经理、法律顾问", text: customRoleTitleBinding)
+                            .textFieldStyle(.roundedBorder)
+                        Text("任务分配和正式执行时，将使用此类型名称与角色 UUID 绑定。")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                field("模型") {
+                    Picker("", selection: modelBinding) {
+                        Text("跟随 CLI 当前默认").tag("")
+                        ForEach(store.workspace.cliSettings.cachedModels) { model in
+                            Text(model.displayName).tag(model.modelID)
+                        }
+                        if !selectedModelID.isEmpty,
+                           !store.workspace.cliSettings.cachedModels.contains(where: { $0.modelID == selectedModelID }) {
+                            Text("\(selectedModelID)（目录外）").tag(selectedModelID)
                         }
                     }
                     .labelsHidden()
-                    let selectedProfile = profiles.first { $0.id == agent.profileID }
-                    ModelBadge(
-                        modelID: selectedProfile?.modelID ?? "",
-                        effort: selectedProfile?.reasoningEffort
-                    )
+                }
+
+                field("思考强度") {
+                    Picker("", selection: effortBinding) {
+                        ForEach(availableEfforts) { effort in
+                            Text(effort.title).tag(effort)
+                        }
+                    }
+                    .labelsHidden()
+                    ModelBadge(modelID: selectedModelID, effort: selectedEffort)
                 }
 
                 field("角色指令") {
@@ -392,6 +430,45 @@ private struct AgentInspector: View {
         }
     }
 
+    private var selectedProfile: CodexProfile? {
+        store.workspace.profiles.first { $0.id == agent.profileID }
+    }
+
+    private var customRoleTitleBinding: Binding<String> {
+        Binding(
+            get: { agent.customRoleTitle ?? "" },
+            set: { agent.customRoleTitle = $0 }
+        )
+    }
+
+    private var selectedModelID: String { selectedProfile?.modelID ?? "" }
+    private var selectedEffort: ReasoningEffort { selectedProfile?.reasoningEffort ?? .medium }
+
+    private var selectedModel: CLIModelDescriptor? {
+        let models = store.workspace.cliSettings.cachedModels
+        return selectedModelID.isEmpty
+            ? (models.first(where: \.isDefault) ?? models.first)
+            : models.first(where: { $0.modelID == selectedModelID })
+    }
+
+    private var availableEfforts: [ReasoningEffort] {
+        selectedModel?.supportedReasoningEfforts ?? ReasoningEffort.allCases
+    }
+
+    private var modelBinding: Binding<String> {
+        Binding(
+            get: { selectedModelID },
+            set: { store.setModel($0, forAgentID: agent.id) }
+        )
+    }
+
+    private var effortBinding: Binding<ReasoningEffort> {
+        Binding(
+            get: { selectedEffort },
+            set: { store.setReasoningEffort($0, forAgentID: agent.id) }
+        )
+    }
+
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title)
@@ -400,6 +477,7 @@ private struct AgentInspector: View {
             content()
         }
     }
+
 }
 
 private struct StepInspector: View {
@@ -433,6 +511,9 @@ private struct StepInspector: View {
                         }
                     }
                     .labelsHidden()
+                    .onChange(of: step.agentID) { _, newValue in
+                        applyRoleDefaults(for: newValue)
+                    }
                 }
 
                 field("输入范围") {
@@ -447,6 +528,21 @@ private struct StepInspector: View {
 
                 field("任务指令") {
                     StableTaskInstructionEditor(text: $step.instruction)
+                }
+
+                field("执行权限") {
+                    Picker("", selection: $step.executionAccess) {
+                        ForEach(StepExecutionAccess.allCases) { access in
+                            Label(access.title, systemImage: access.symbol).tag(access)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(step.executionAccess == .workspaceWrite
+                         ? "Codex CLI 可修改当前项目目录并运行命令；不会获得项目目录外的额外写权限。"
+                         : "适合设计、收集和审核；模型只能读取项目并返回文本产物。")
+                        .font(.caption2)
+                        .foregroundStyle(step.executionAccess == .workspaceWrite ? Color(hex: "FBBF24") : .secondary)
                 }
 
                 Toggle(isOn: $step.requiresApproval) {
@@ -468,9 +564,20 @@ private struct StepInspector: View {
                         }
                     }
                     .labelsHidden()
-                    Text("当输出含 VERDICT: FAIL 时，最多自动回退重做一次。")
+                    Text("审核必须输出 AIGO_VERDICT: PASS/FAIL；FAIL 时回到更早步骤。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                }
+
+                if step.reviewReturnStepID != nil {
+                    Stepper(value: $step.maxReviewRetries, in: 1...5) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("最多回环 \(step.maxReviewRetries) 次")
+                            Text("超过上限仍失败时停止整个流程")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Divider()
@@ -486,6 +593,23 @@ private struct StepInspector: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             content()
+        }
+    }
+
+    private func applyRoleDefaults(for agentID: UUID) {
+        guard let role = agents.first(where: { $0.id == agentID })?.role else { return }
+        if role == .coder {
+            step.executionAccess = .workspaceWrite
+            if !step.instruction.contains("真实文件") {
+                step.instruction += "\n\n必须检查并修改当前项目目录中的真实文件，运行相关测试或构建；不得只返回伪代码。"
+            }
+        } else if role == .reviewer {
+            step.executionAccess = .readOnly
+            if !step.instruction.contains("AIGO_VERDICT") {
+                step.instruction += "\n\n必须单独输出 AIGO_VERDICT: PASS 或 AIGO_VERDICT: FAIL。"
+            }
+        } else {
+            step.executionAccess = .workspaceWrite
         }
     }
 }
@@ -524,6 +648,9 @@ private struct StableTaskInstructionEditor: View {
         )
         .onChange(of: draft) { _, newValue in
             if text != newValue { text = newValue }
+        }
+        .onChange(of: text) { _, newValue in
+            if !isFocused, draft != newValue { draft = newValue }
         }
     }
 }

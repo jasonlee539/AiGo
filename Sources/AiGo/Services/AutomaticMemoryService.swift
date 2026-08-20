@@ -12,9 +12,14 @@ struct MemoryUpsertResult {
     var record: MemoryRecord
 }
 
+struct MemoryBatchUpsertResult {
+    var project: ProjectWorkspace
+    var records: [MemoryRecord]
+}
+
 enum AutomaticMemoryService {
-    static let promptCharacterBudget = 9_000
-    static let promptRecordLimit = 14
+    static let promptCharacterBudget = 6_000
+    static let promptRecordLimit = 10
     static let maximumAtomicRecordsPerStep = 10
 
     static func synchronizeMainline(in project: ProjectWorkspace) -> ProjectWorkspace {
@@ -72,7 +77,7 @@ enum AutomaticMemoryService {
 
         let oldAgents = Dictionary(uniqueKeysWithValues: old.agents.map { ($0.id, $0) })
         let newAgents = Dictionary(uniqueKeysWithValues: new.agents.map { ($0.id, $0) })
-        for agent in new.agents where oldAgents[agent.id] == nil { changes.append("新增智能体：\(agent.name)（\(agent.role.title)）") }
+        for agent in new.agents where oldAgents[agent.id] == nil { changes.append("新增智能体：\(agent.name)（\(agent.roleTitle)）") }
         for agent in old.agents where newAgents[agent.id] == nil { changes.append("移除智能体：\(agent.name)") }
         for agent in new.agents {
             if let previous = oldAgents[agent.id], previous != agent {
@@ -168,7 +173,7 @@ enum AutomaticMemoryService {
     ) -> MemorySelection {
         let active = project.memories.filter { $0.isActive && $0.kind.participatesInPrompt }
         let mainline = active.first(where: { $0.kind == .mainline })
-        let query = "\(project.projectName) \(agent.name) \(agent.role.title) \(agent.instruction) \(step.title) \(step.instruction)"
+        let query = "\(project.projectName) \(agent.name) \(agent.roleTitle) \(agent.instruction) \(step.title) \(step.instruction)"
         let queryTerms = relevanceTerms(from: query)
 
         let candidates = active.enumerated()
@@ -234,6 +239,34 @@ enum AutomaticMemoryService {
         return MemoryUpsertResult(project: updated, record: resolved)
     }
 
+    static func upserting(_ incoming: [MemoryRecord], into project: ProjectWorkspace) -> MemoryBatchUpsertResult {
+        var updated = project
+        var resolvedRecords: [MemoryRecord] = []
+        for item in incoming {
+            var resolved = item
+            if let stableKey = item.stableKey,
+               let index = updated.memories.firstIndex(where: { $0.stableKey == stableKey }) {
+                let previous = updated.memories[index]
+                resolved.id = previous.id
+                resolved.createdAt = previous.createdAt
+                resolved.revision = previous.revision + (previous.content == item.content && previous.kind == item.kind ? 0 : 1)
+                resolved.updatedAt = Date()
+                updated.memories.remove(at: index)
+            }
+            updated.memories.append(resolved)
+            resolvedRecords.append(resolved)
+        }
+        updated = compacted(updated)
+
+        let retainedIDs = Set(updated.memories.map(\.id))
+        var seenIDs = Set<UUID>()
+        let retained = resolvedRecords.reversed().compactMap { record -> MemoryRecord? in
+            guard retainedIDs.contains(record.id), seenIDs.insert(record.id).inserted else { return nil }
+            return updated.memories.first(where: { $0.id == record.id })
+        }.reversed()
+        return MemoryBatchUpsertResult(project: updated, records: Array(retained))
+    }
+
     static func appending(_ record: MemoryRecord, to project: ProjectWorkspace) -> ProjectWorkspace {
         upserting(record, into: project).project
     }
@@ -250,11 +283,18 @@ enum AutomaticMemoryService {
         let agentLines = project.agents.map { agent -> String in
             let profile = profileByID[agent.profileID]
             let model = profile?.modelID.isEmpty == false ? profile!.modelID : "跟随 CLI 默认模型"
-            return "- \(agent.name)｜\(agent.role.title)｜\(model)｜\(profile?.reasoningEffort.rawValue ?? "default")"
+            return "- \(agent.name)｜\(agent.roleTitle)｜\(model)｜\(profile?.reasoningEffort.rawValue ?? "default")"
         }.joined(separator: "\n")
         let agentByID = Dictionary(uniqueKeysWithValues: project.agents.map { ($0.id, $0) })
         let allSteps = project.steps.enumerated().map { index, step in
-            "\(index + 1). \(step.title) → \(agentByID[step.agentID]?.name ?? "未分配")\(step.requiresApproval ? " [人工门控]" : "")"
+            let loop: String
+            if let target = step.reviewReturnStepID,
+               let targetIndex = project.steps.firstIndex(where: { $0.id == target }) {
+                loop = " [FAIL→步骤 \(targetIndex + 1)，最多 \(step.maxReviewRetries) 次]"
+            } else {
+                loop = ""
+            }
+            return "\(index + 1). \(step.title) → \(agentByID[step.agentID]?.name ?? "未分配") [\(step.executionAccess.rawValue)]\(step.requiresApproval ? " [人工门控]" : "")\(loop)"
         }.joined(separator: "\n")
         let stepLines = bounded(allSteps, limit: 2_400)
         let brief = bounded(project.projectBrief, limit: 1_600)
@@ -293,7 +333,7 @@ enum AutomaticMemoryService {
                 continue
             }
             if trimmed.hasPrefix("#"), !trimmed.localizedCaseInsensitiveContains("共享记忆更新") { break }
-            if trimmed.uppercased().hasPrefix("VERDICT:") { break }
+            if ReviewVerdictParser.parse(trimmed) != nil { break }
             result.append(line)
         }
         let body = result.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)

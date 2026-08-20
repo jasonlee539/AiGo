@@ -12,6 +12,13 @@ struct CodexCLIUsage: Hashable {
     var outputTokens: Int?
 }
 
+struct CodexCLICompletion: Hashable {
+    var output: String
+    var threadID: String?
+    var activities: [String]
+    var usage: CodexCLIUsage?
+}
+
 enum CodexCLIStreamEvent: Hashable {
     case threadStarted(String)
     case agentMessage(String)
@@ -24,6 +31,7 @@ enum CodexCLIError: LocalizedError {
     case executableNotFound(String)
     case launch(String)
     case commandFailed(Int32, String)
+    case reported(String)
     case invalidCatalog
     case noAgentMessage
 
@@ -32,6 +40,7 @@ enum CodexCLIError: LocalizedError {
         case .executableNotFound(let path): return "找不到可执行的 Codex CLI：\(path)"
         case .launch(let detail): return "无法启动 Codex CLI：\(detail)"
         case .commandFailed(let status, let detail): return "Codex CLI 退出码 \(status)：\(detail)"
+        case .reported(let detail): return "Codex CLI 报告失败：\(detail)"
         case .invalidCatalog: return "Codex CLI 返回了无法解析的模型目录。"
         case .noAgentMessage: return "Codex CLI 已结束，但没有返回智能体正文。"
         }
@@ -56,21 +65,17 @@ enum CodexCLIService {
         workingDirectory: URL,
         modelID: String,
         reasoningEffort: ReasoningEffort,
+        executionAccess: StepExecutionAccess = .workspaceWrite,
         prompt: String
     ) -> AsyncThrowingStream<CodexCLIStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let process = configuredProcess(executablePath: executablePath)
-            var arguments = [
-                "exec",
-                "--json",
-                "--ephemeral",
-                "--sandbox", "read-only",
-                "--skip-git-repo-check",
-                "--color", "never",
-                "-C", workingDirectory.path
-            ]
-            if !modelID.isEmpty { arguments += ["--model", modelID] }
-            arguments += ["--config", "model_reasoning_effort=\"\(reasoningEffort.rawValue)\"", "-"]
+            let arguments = executionArguments(
+                workingDirectory: workingDirectory,
+                modelID: modelID,
+                reasoningEffort: reasoningEffort,
+                executionAccess: executionAccess
+            )
             process.arguments = commandArguments(executablePath: executablePath, arguments: arguments)
             process.currentDirectoryURL = workingDirectory
 
@@ -118,6 +123,63 @@ enum CodexCLIService {
         }
     }
 
+    static func complete(
+        executablePath: String,
+        workingDirectory: URL,
+        modelID: String,
+        reasoningEffort: ReasoningEffort,
+        executionAccess: StepExecutionAccess = .workspaceWrite,
+        prompt: String
+    ) async throws -> CodexCLICompletion {
+        var completion = CodexCLICompletion(output: "", threadID: nil, activities: [], usage: nil)
+        for try await event in stream(
+            executablePath: executablePath,
+            workingDirectory: workingDirectory,
+            modelID: modelID,
+            reasoningEffort: reasoningEffort,
+            executionAccess: executionAccess,
+            prompt: prompt
+        ) {
+            switch event {
+            case .threadStarted(let threadID):
+                completion.threadID = threadID
+            case .agentMessage(let message):
+                if !completion.output.isEmpty { completion.output += "\n\n" }
+                completion.output += message
+            case .activity(let activity):
+                completion.activities.append(activity)
+            case .completed(let usage):
+                completion.usage = usage
+            case .failed(let message):
+                throw CodexCLIError.reported(message)
+            }
+        }
+        guard !completion.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CodexCLIError.noAgentMessage
+        }
+        return completion
+    }
+
+    static func executionArguments(
+        workingDirectory: URL,
+        modelID: String,
+        reasoningEffort: ReasoningEffort,
+        executionAccess: StepExecutionAccess
+    ) -> [String] {
+        var arguments = [
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--sandbox", executionAccess.rawValue,
+            "--skip-git-repo-check",
+            "--color", "never",
+            "-C", workingDirectory.path
+        ]
+        if !modelID.isEmpty { arguments += ["--model", modelID] }
+        arguments += ["--config", "model_reasoning_effort=\"\(reasoningEffort.rawValue)\"", "-"]
+        return arguments
+    }
+
     static func parseJSONLine(_ line: String) -> CodexCLIStreamEvent? {
         guard let data = line.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -132,12 +194,12 @@ enum CodexCLIService {
                 return .agentMessage(text)
             }
             if itemType == "command_execution", let command = item["command"] as? String {
-                return .activity("只读命令：\(String(command.prefix(180)))")
+                return .activity("命令：\(String(command.prefix(180)))")
             }
             if itemType == "web_search", let query = item["query"] as? String {
                 return .activity("检索：\(String(query.prefix(180)))")
             }
-            if itemType == "file_change" { return .activity("CLI 报告文件变更事件；当前运行被 read-only 沙箱约束。") }
+            if itemType == "file_change" { return .activity("CLI 文件变更：\(String((item["changes"] as? String ?? "项目文件已更新").prefix(180)))") }
             return nil
         case "turn.completed":
             let usage = object["usage"] as? [String: Any]

@@ -40,11 +40,11 @@ enum AgentRole: String, CaseIterable, Codable, Identifiable, Hashable {
         case .methodologist:
             return "设计变量、数据、实验或分析方法，检查混杂因素、统计有效性、复现要求和失效条件。"
         case .coder:
-            return "把已确定的方法转化为模块化实现方案或代码，说明接口、错误边界、测试和运行假设。"
+            return "在授权写入的代码步骤中，直接检查当前项目并修改真实文件，完成可运行实现与必要测试；不得只给伪代码、代码片段或口头方案。若步骤保持只读，则明确给出无法落盘的边界。"
         case .analyst:
             return "解释数据、比较方案、量化不确定性，并输出可追踪、可复核的分析过程。"
         case .reviewer:
-            return "独立审核上游产物并逐项对照验收标准；最后一行严格输出 VERDICT: PASS 或 VERDICT: FAIL。"
+            return "独立审核上游产物并逐项对照验收标准，列出可执行的失败原因；必须单独输出一行 AIGO_VERDICT: PASS 或 AIGO_VERDICT: FAIL，供编排器可靠判定。"
         case .writer:
             return "将已审核内容组织成结构严谨、事实边界清楚、限制完整的科研文稿。"
         case .custom:
@@ -154,6 +154,7 @@ struct AgentSeat: Identifiable, Codable, Hashable {
     var id: UUID
     var name: String
     var role: AgentRole
+    var customRoleTitle: String?
     var instruction: String
     var profileID: UUID
     var colorHex: String
@@ -162,6 +163,7 @@ struct AgentSeat: Identifiable, Codable, Hashable {
         id: UUID = UUID(),
         name: String,
         role: AgentRole,
+        customRoleTitle: String? = nil,
         instruction: String? = nil,
         profileID: UUID,
         colorHex: String? = nil
@@ -169,9 +171,16 @@ struct AgentSeat: Identifiable, Codable, Hashable {
         self.id = id
         self.name = name
         self.role = role
+        self.customRoleTitle = customRoleTitle
         self.instruction = instruction ?? role.defaultInstruction
         self.profileID = profileID
         self.colorHex = colorHex ?? role.tintHex
+    }
+
+    var roleTitle: String {
+        guard role == .custom else { return role.title }
+        let title = customRoleTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return title.isEmpty ? role.title : title
     }
 }
 
@@ -181,14 +190,25 @@ enum StepInputMode: String, CaseIterable, Codable, Identifiable, Hashable {
     var title: String { self == .previous ? "仅上一步产物" : "压缩累计产物" }
 }
 
+enum StepExecutionAccess: String, CaseIterable, Codable, Identifiable, Hashable {
+    case readOnly = "read-only"
+    case workspaceWrite = "workspace-write"
+
+    var id: String { rawValue }
+    var title: String { self == .readOnly ? "只读分析" : "允许写项目文件" }
+    var symbol: String { self == .readOnly ? "eye.fill" : "pencil.and.outline" }
+}
+
 struct WorkflowStep: Identifiable, Codable, Hashable {
     var id: UUID
     var title: String
     var instruction: String
     var agentID: UUID
     var inputMode: StepInputMode
+    var executionAccess: StepExecutionAccess
     var requiresApproval: Bool
     var reviewReturnStepID: UUID?
+    var maxReviewRetries: Int
 
     init(
         id: UUID = UUID(),
@@ -196,16 +216,38 @@ struct WorkflowStep: Identifiable, Codable, Hashable {
         instruction: String,
         agentID: UUID,
         inputMode: StepInputMode = .accumulated,
+        executionAccess: StepExecutionAccess = .workspaceWrite,
         requiresApproval: Bool = false,
-        reviewReturnStepID: UUID? = nil
+        reviewReturnStepID: UUID? = nil,
+        maxReviewRetries: Int = 1
     ) {
         self.id = id
         self.title = title
         self.instruction = instruction
         self.agentID = agentID
         self.inputMode = inputMode
+        self.executionAccess = executionAccess
         self.requiresApproval = requiresApproval
         self.reviewReturnStepID = reviewReturnStepID
+        self.maxReviewRetries = min(max(maxReviewRetries, 1), 5)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, instruction, agentID, inputMode, executionAccess
+        case requiresApproval, reviewReturnStepID, maxReviewRetries
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "迁移步骤"
+        instruction = try container.decodeIfPresent(String.self, forKey: .instruction) ?? ""
+        agentID = try container.decode(UUID.self, forKey: .agentID)
+        inputMode = try container.decodeIfPresent(StepInputMode.self, forKey: .inputMode) ?? .accumulated
+        executionAccess = try container.decodeIfPresent(StepExecutionAccess.self, forKey: .executionAccess) ?? .workspaceWrite
+        requiresApproval = try container.decodeIfPresent(Bool.self, forKey: .requiresApproval) ?? false
+        reviewReturnStepID = try container.decodeIfPresent(UUID.self, forKey: .reviewReturnStepID)
+        maxReviewRetries = min(max(try container.decodeIfPresent(Int.self, forKey: .maxReviewRetries) ?? 1, 1), 5)
     }
 }
 
@@ -355,7 +397,9 @@ enum RunPhase: String, Codable, Hashable {
     }
 }
 
-enum StepRunStatus: String, Codable, Hashable { case queued, running, completed, failed, cancelled }
+enum StepRunStatus: String, Codable, Hashable {
+    case queued, running, completed, failed, cancelled, interrupted
+}
 
 struct StepExecution: Identifiable, Codable, Hashable {
     var id: UUID
@@ -376,6 +420,7 @@ struct StepExecution: Identifiable, Codable, Hashable {
     var reasoningEffort: String?
     var cliThreadID: String?
     var activityLog: [String]?
+    var executionAccess: StepExecutionAccess?
 
     init(
         id: UUID = UUID(),
@@ -387,6 +432,7 @@ struct StepExecution: Identifiable, Codable, Hashable {
         contextPreview: String,
         modelID: String?,
         reasoningEffort: String,
+        executionAccess: StepExecutionAccess = .workspaceWrite,
         startedAt: Date = Date()
     ) {
         self.id = id
@@ -407,6 +453,7 @@ struct StepExecution: Identifiable, Codable, Hashable {
         self.reasoningEffort = reasoningEffort
         self.cliThreadID = nil
         self.activityLog = []
+        self.executionAccess = executionAccess
     }
 }
 
@@ -436,6 +483,43 @@ struct RunSession: Identifiable, Codable, Hashable {
 
     static var idle: RunSession {
         RunSession(id: UUID(), phase: .idle, startedAt: nil, completedAt: nil, currentStepIndex: nil, executions: [], events: [], errorMessage: nil, projectID: nil)
+    }
+}
+
+struct ReviewRetryCheckpoint: Codable, Hashable {
+    var reviewerStepID: UUID
+    var retryCount: Int
+}
+
+/// A small, project-scoped crash-recovery snapshot. The project itself remains in workspace.json;
+/// this file only carries the volatile orchestration state needed to resume safely.
+struct RunCheckpoint: Codable, Hashable, Identifiable {
+    var schemaVersion: Int
+    var projectID: UUID
+    var session: RunSession
+    var nextStepIndex: Int
+    var approvedGateIDs: [UUID]
+    var reviewRetryCounts: [ReviewRetryCheckpoint]
+    var savedAt: Date
+
+    var id: UUID { session.id }
+
+    init(
+        schemaVersion: Int = 1,
+        projectID: UUID,
+        session: RunSession,
+        nextStepIndex: Int,
+        approvedGateIDs: [UUID],
+        reviewRetryCounts: [ReviewRetryCheckpoint],
+        savedAt: Date = Date()
+    ) {
+        self.schemaVersion = schemaVersion
+        self.projectID = projectID
+        self.session = session
+        self.nextStepIndex = nextStepIndex
+        self.approvedGateIDs = approvedGateIDs
+        self.reviewRetryCounts = reviewRetryCounts
+        self.savedAt = savedAt
     }
 }
 
@@ -487,8 +571,8 @@ struct ProjectWorkspace: Codable, Hashable, Identifiable {
     static func starter(name: String = "未命名科研项目") -> ProjectWorkspace {
         let fast = CodexProfile(name: "CLI 快速", reasoningEffort: .low)
         let standard = CodexProfile(name: "CLI 标准", reasoningEffort: .medium)
-        let deep = CodexProfile(name: "CLI 深度", reasoningEffort: .high)
-        let audit = CodexProfile(name: "CLI 审核", reasoningEffort: .xhigh)
+        let deep = CodexProfile(name: "CLI 深度", reasoningEffort: .medium)
+        let audit = CodexProfile(name: "CLI 审核", reasoningEffort: .high)
 
         let architect = AgentSeat(name: "总体设计师", role: .architect, profileID: deep.id)
         let collector = AgentSeat(name: "信息收集员", role: .collector, profileID: standard.id)
@@ -500,15 +584,27 @@ struct ProjectWorkspace: Codable, Hashable, Identifiable {
         let design = WorkflowStep(title: "建立研究蓝图", instruction: "拆解研究问题、假设、交付物、验收标准和风险。", agentID: architect.id, requiresApproval: true)
         let evidence = WorkflowStep(title: "整理证据与资料", instruction: "制定检索策略，整理证据、冲突结论和证据缺口；不得虚构引用。", agentID: collector.id)
         let method = WorkflowStep(title: "形成研究方法", instruction: "定义数据、变量、实验或分析方法、对照、评价指标与复现要求。", agentID: methodologist.id)
-        let implementation = WorkflowStep(title: "给出实现方案", instruction: "把方法转成模块、接口、伪代码或代码，并给出测试与失败处理。", agentID: coder.id)
-        let review = WorkflowStep(title: "独立质量审核", instruction: "检查证据、方法、实现与复现性；最后一行只写 VERDICT: PASS 或 VERDICT: FAIL。", agentID: reviewer.id, reviewReturnStepID: method.id)
+        let implementation = WorkflowStep(
+            title: "实现并验证代码",
+            instruction: "检查当前项目结构，在项目目录中直接修改或新建真实代码文件，完成已经确定的方法；运行相关测试或构建命令，修复可复现错误，并在产物中列出修改文件、验证结果和剩余风险。不得只返回伪代码或建议。",
+            agentID: coder.id,
+            executionAccess: .workspaceWrite
+        )
+        let review = WorkflowStep(
+            title: "独立质量审核",
+            instruction: "检查证据、方法、实际文件修改、测试结果与复现性。先列出逐项结论和需要返工的具体问题，再单独输出且只输出一个机器判定行：AIGO_VERDICT: PASS 或 AIGO_VERDICT: FAIL。",
+            agentID: reviewer.id,
+            executionAccess: .readOnly,
+            reviewReturnStepID: method.id,
+            maxReviewRetries: 2
+        )
         let writing = WorkflowStep(title: "汇总科研报告", instruction: "只使用通过审核的内容形成科研报告，保留限制、风险和待核验项。", agentID: writer.id)
 
         let now = Date()
         let projectID = UUID()
         return ProjectWorkspace(
             id: projectID,
-            schemaVersion: 3,
+            schemaVersion: 5,
             projectName: name,
             projectBrief: "在这里写清研究目标、对象、可用资料、约束条件和期望交付物。",
             projectDirectoryPath: "",
@@ -531,7 +627,7 @@ struct ProjectWorkspace: Codable, Hashable, Identifiable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        schemaVersion = 3
+        schemaVersion = 5
         projectName = try container.decodeIfPresent(String.self, forKey: .projectName) ?? "迁移项目"
         projectBrief = try container.decodeIfPresent(String.self, forKey: .projectBrief) ?? ""
         projectDirectoryPath = try container.decodeIfPresent(String.self, forKey: .projectDirectoryPath) ?? ""
@@ -546,7 +642,7 @@ struct ProjectWorkspace: Codable, Hashable, Identifiable {
     }
 
     mutating func sanitize() {
-        schemaVersion = 3
+        schemaVersion = 5
         projectDirectoryPath = projectDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         agents = Array(agents.prefix(WorkspaceRules.maxAgents))
         if profiles.isEmpty { profiles = [CodexProfile(name: "CLI 默认", reasoningEffort: .medium)] }
@@ -562,8 +658,11 @@ struct ProjectWorkspace: Codable, Hashable, Identifiable {
         }
         let stepIDs = Set(steps.map(\.id))
         for index in steps.indices {
+            steps[index].maxReviewRetries = min(max(steps[index].maxReviewRetries, 1), 5)
             if let target = steps[index].reviewReturnStepID,
-               target == steps[index].id || !stepIDs.contains(target) {
+               target == steps[index].id
+                || !stepIDs.contains(target)
+                || steps.firstIndex(where: { $0.id == target }).map({ $0 >= index }) != false {
                 steps[index].reviewReturnStepID = nil
             }
         }
@@ -593,11 +692,11 @@ struct WorkspaceLibrary: Codable, Hashable {
 
     static func starter() -> WorkspaceLibrary {
         let project = ProjectWorkspace.starter()
-        return WorkspaceLibrary(schemaVersion: 3, selectedProjectID: project.id, projects: [project], updatedAt: Date())
+        return WorkspaceLibrary(schemaVersion: 5, selectedProjectID: project.id, projects: [project], updatedAt: Date())
     }
 
     mutating func sanitize() {
-        schemaVersion = 3
+        schemaVersion = 5
         if projects.isEmpty { projects = [.starter()] }
         for index in projects.indices { projects[index].sanitize() }
         if !projects.contains(where: { $0.id == selectedProjectID }) { selectedProjectID = projects[0].id }
@@ -613,10 +712,27 @@ enum WorkspaceRules {
     static func validationMessage(for workspace: ProjectWorkspace) -> String? {
         if workspace.agents.isEmpty { return "至少需要一个智能体。" }
         if workspace.agents.count > maxAgents { return "智能体最多只能有 8 个。" }
-        if workspace.steps.isEmpty { return "至少需要一个流程步骤。" }
         if workspace.projectBrief.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "请先填写项目目标。" }
-        let agentIDs = Set(workspace.agents.map(\.id))
-        if workspace.steps.contains(where: { !agentIDs.contains($0.agentID) }) { return "流程中存在未分配智能体的步骤。" }
+        return workflowValidationMessage(steps: workspace.steps, agents: workspace.agents)
+    }
+
+    static func workflowValidationMessage(steps: [WorkflowStep], agents: [AgentSeat]) -> String? {
+        if steps.isEmpty { return "至少需要一个流程步骤。" }
+        let agentIDs = Set(agents.map(\.id))
+        if steps.contains(where: { !agentIDs.contains($0.agentID) }) { return "流程中存在未分配智能体的步骤。" }
+        for (index, step) in steps.enumerated() {
+            if step.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "第 \(index + 1) 步缺少步骤名称。"
+            }
+            if step.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "第 \(index + 1) 步缺少任务指令。"
+            }
+            if let target = step.reviewReturnStepID {
+                guard let targetIndex = steps.firstIndex(where: { $0.id == target }), targetIndex < index else {
+                    return "第 \(index + 1) 步的审核回环必须指向更早步骤。"
+                }
+            }
+        }
         return nil
     }
 }

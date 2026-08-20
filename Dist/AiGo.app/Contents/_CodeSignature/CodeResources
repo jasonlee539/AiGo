@@ -3,9 +3,22 @@
 <plist version="1.0">
 <dict>
 	<key>files</key>
-	<dict/>
+	<dict>
+		<key>Resources/tray-icon.png</key>
+		<data>
+		kdip9Fdoy7+uXeUj5cWbUpwyqZ4=
+		</data>
+	</dict>
 	<key>files2</key>
-	<dict/>
+	<dict>
+		<key>Resources/tray-icon.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			fYFIAYUJgzdX58cjk9uxwjN6swh0gXYsq/a8DwK1Fqc=
+			</data>
+		</dict>
+	</dict>
 	<key>rules</key>
 	<dict>
 		<key>^Resources/</key>

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 extension Color {
@@ -24,29 +25,7 @@ extension Color {
 
 struct AiGoBackground: View {
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(hex: "0A1024"),
-                    Color(hex: "111A35"),
-                    Color(hex: "16132B")
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            RadialGradient(
-                colors: [Color(hex: "6E7BFF").opacity(0.22), .clear],
-                center: .topLeading,
-                startRadius: 30,
-                endRadius: 650
-            )
-            RadialGradient(
-                colors: [Color(hex: "14B8A6").opacity(0.12), .clear],
-                center: .bottomTrailing,
-                startRadius: 20,
-                endRadius: 540
-            )
-        }
+        Color(hex: "17191C")
         .ignoresSafeArea()
     }
 }
@@ -59,17 +38,45 @@ struct GlassPanelModifier: ViewModifier {
         content
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    .fill(Color(hex: emphasized ? "24272B" : "202327"))
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(emphasized ? Color.white.opacity(0.045) : Color.clear)
+                            .fill(emphasized ? Color.white.opacity(0.012) : Color.clear)
                     )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.white.opacity(emphasized ? 0.18 : 0.10), lineWidth: 1)
+                    .stroke(Color.white.opacity(emphasized ? 0.10 : 0.065), lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.18), radius: 18, y: 10)
+            .shadow(color: Color.black.opacity(0.16), radius: 8, y: 3)
+    }
+}
+
+struct AppBrandIcon: View {
+    private var image: NSImage? {
+        let candidates = [
+            Bundle.main.url(forResource: "tray-icon", withExtension: "png"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("src/tray-icon.png")
+        ]
+        return candidates.compactMap { $0 }.compactMap(NSImage.init(contentsOf:)).first
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Image(systemName: "app.dashed")
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityLabel("AiGo")
     }
 }
 
@@ -85,7 +92,7 @@ struct ModelBadge: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkles")
+            Image(systemName: "terminal")
             Text(modelID.isEmpty ? "CLI 默认模型" : modelID)
             if let effort {
                 Text("· \(effort.title)")
@@ -95,8 +102,8 @@ struct ModelBadge: View {
         .font(.caption.weight(.medium))
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Color(hex: "6E7BFF").opacity(0.16), in: Capsule())
-        .overlay(Capsule().stroke(Color(hex: "8B96FF").opacity(0.32)))
+        .padding(.horizontal, 1)
+        .foregroundStyle(.secondary)
     }
 }
 

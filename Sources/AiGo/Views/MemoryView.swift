@@ -57,7 +57,7 @@ struct MemoryView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text("\(knowledgeCount) 条有效知识")
                     .font(.caption.monospacedDigit().weight(.semibold))
-                Text("每次最多注入 14 条 / 9,000 字符")
+                Text("每次最多注入 10 条 / 6,000 字符")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }

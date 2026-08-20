@@ -5,7 +5,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 DIST_DIR="$PROJECT_ROOT/Dist"
 APP_PATH="$DIST_DIR/AiGo.app"
-DMG_PATH="$DIST_DIR/AiGo-0.1.1-AppleSilicon.dmg"
+DMG_PATH="$DIST_DIR/AiGo-0.1.4-AppleSilicon.dmg"
 
 "$SCRIPT_DIR/build-app.sh"
 
@@ -28,7 +28,7 @@ if [[ -e "$DMG_PATH" ]]; then
 fi
 
 /usr/bin/hdiutil create \
-    -volname "AiGo 0.1.1" \
+    -volname "AiGo 0.1.4" \
     -srcfolder "$STAGE_ROOT" \
     -format UDZO \
     -ov \

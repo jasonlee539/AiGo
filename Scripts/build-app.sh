@@ -45,6 +45,7 @@ fi
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 /usr/bin/ditto "$BINARY_PATH" "$APP_PATH/Contents/MacOS/AiGo"
 /bin/cp "$PROJECT_ROOT/Resources/Info.plist" "$APP_PATH/Contents/Info.plist"
+/bin/cp "$PROJECT_ROOT/src/tray-icon.png" "$APP_PATH/Contents/Resources/tray-icon.png"
 /bin/chmod 755 "$APP_PATH/Contents/MacOS/AiGo"
 
 /usr/bin/plutil -lint "$APP_PATH/Contents/Info.plist"
